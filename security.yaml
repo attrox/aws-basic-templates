@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Create security group For EC2 Instances, associate with a VPC and Export them"
+Metadata: 
+  Author: !Ref ParamAuthorName
+
+Parameters:
+  ParamAuthorName: 
+    Type: String
+    Description: The owner of the CFT
+  ParamAllowSSHFromRange:
+    Type: String
+    Description: IP CidrBlock to allow SSH from
+    Default: 0.0.0.0/0
+  ParamAllowSSHAccess:
+    Type: String
+    AllowedValues: [ true, false ]
+    Default: true
+    ConstraintDescription: Please input true of false for SSH Access
+  ParamVpcStackName:
+    Type: String
+
+Conditions:
+  AllowSSHAccess: !Equals [ !Ref ParamAllowSSHAccess, true ]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for SSH and HTTP access"
+      VpcId:
+        Fn::ImportValue: !Sub "${ParamVpcStackName}-VpcId"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - !If
+        - AllowSSHAccess
+        -
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref ParamAllowSSHFromRange
+        - !Ref AWS::NoValue
+
+Outputs:
+  SecurityGroupName:
+    Description: Name of the security group
+    Value: !Ref SecurityGroup
+  SecurityGroupId:
+    Description: ID of the security group
+    Value: !GetAtt [ SecurityGroup, GroupId ]
+    Export:
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
