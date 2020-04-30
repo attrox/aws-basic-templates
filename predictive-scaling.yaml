@@ -1,0 +1,60 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates predictive scaling plan for the Autoscaling group
+
+Parameters:
+  DisableDynamicScaling:
+    Type: String
+    Default: true
+
+  ScalingMode:
+    Type: String
+    AllowedValues:
+      - ForecastOnly
+      - ForecastAndScale
+    Default: ForecastOnly
+
+  ASGMinSize:
+    Type: String
+    Description: The minimum number of machines in the ASG.
+    Default: '2'
+
+  ASGMaxSize:
+    Type: String
+    Description: The maximum number of machines in the ASG.
+    Default: '5'
+
+  AsgId:
+    Type: String
+    Description: The ID of the Auto Scaling Group
+    
+  TargetCpuUtilization:
+    Type: String
+    Default: 50.0
+
+Resources:
+  PredictiveScalingPlan:
+    Type: AWS::AutoScalingPlans::ScalingPlan
+    Properties:
+      ApplicationSource:
+        TagFilters:
+          - Key: predictive-asg
+            Values:
+              - 'true'
+      ScalingInstructions:
+        - ServiceNamespace: autoscaling
+          ScalableDimension: autoscaling:autoScalingGroup:DesiredCapacity
+          MinCapacity: !Ref ASGMinSize
+          MaxCapacity: !Ref ASGMaxSize
+          DisableDynamicScaling: !Ref DisableDynamicScaling
+          PredictiveScalingMode: !Ref ScalingMode
+          PredefinedLoadMetricSpecification:
+            PredefinedLoadMetricType: ASGTotalCPUUtilization
+          TargetTrackingConfigurations:
+            - PredefinedScalingMetricSpecification:
+                PredefinedScalingMetricType: ASGAverageCPUUtilization
+              TargetValue: !Ref TargetCpuUtilization
+              EstimatedInstanceWarmup: 180
+
+          ResourceId: !Sub "autoScalingGroup/${AsgId}"
+          ScalingPolicyUpdateBehavior: KeepExternalPolicies
