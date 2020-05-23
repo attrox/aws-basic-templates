@@ -78,6 +78,9 @@ Resources:
                           result += chunk;
                       });
                       response.on('end', () => {
+                          console.log('STATUS: ' + response.statusCode);
+                          console.log('HEADERS: ' + JSON.stringify(response.headers));
+                          console.log(response);
                           console.log(result);
                           resolve();
                       });
