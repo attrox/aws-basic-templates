@@ -1,0 +1,141 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create Custom resource lambda that will return the next valid rule priority for a given ALB
+
+Parameters:
+  ALBListenerArn:
+    Type: String
+    Description: The ALB listener ARN
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: describe-rules
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - elasticloadbalancing:DescribeRules
+              Resource: '*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  
+  ListenerRuleCounter:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Function to return next available listener rule priority
+      Handler: index.handler
+      Role: !GetAtt ExecutionRole.Arn
+      Runtime: nodejs12.x
+      Timeout: 10
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const https = require('https');
+          const url = require('url');
+          const SUCCESS = 'SUCCESS';
+          const FAILED = 'FAILED';
+          // Sending Response to Cloudformation to signal, success/failure of Custom Resource creation
+          const sendCloudformationResponse = (event, context, responseStatus, data = null, reason = null) => {
+              const responseBody = JSON.stringify({
+                  Status: responseStatus,
+                  Reason: reason || 'See the details in CloudWatch Log Stream: ' + context.logStreamName,
+                  PhysicalResourceId: context.logStreamName,
+                  StackId: event.StackId,
+                  RequestId: event.RequestId,
+                  LogicalResourceId: event.LogicalResourceId,
+                  Data: data
+              });
+              console.log('SENDING RESPONSE BODY:\n', responseBody);
+
+              const parsedUrl = url.parse(event.ResponseURL);
+              const options = {
+                  hostname: parsedUrl.hostname,
+                  port: 443,
+                  path: parsedUrl.path,
+                  method: 'PUT',
+                  headers: {
+                      'content-type': '',
+                      'content-length': responseBody.length
+                  }
+              };
+
+              return new Promise((resolve, reject) => {
+                  const request = https.request(options, (response) => {
+                      let result = '';
+                      response.on('data', chunk => {
+                          result += chunk;
+                      });
+                      response.on('end', () => {
+                          console.log(result);
+                          resolve();
+                      });
+                  });
+                  request.on('error', error => {
+                      console.error('sendResponse Error:' + error);
+                      reject(error);
+                  });
+                  request.write(responseBody);
+                  request.end();
+              });
+          };
+
+          const getRuleCount = async (listenerArn) => {
+              const elbv2 = new AWS.ELBv2({apiVersion: '2015-12-01'});
+              const data = await elbv2.describeRules({ ListenerArn: listenerArn }).promise(); 
+              const priorities = data.Rules.map(item => {
+                  if (isNaN(item.Priority)) {
+                      return 0;
+                  }
+                  return parseInt(item.Priority);
+              });
+
+              return {
+                  count: data.Rules.length,
+                  nextPriority: Math.max(...priorities)+1
+              }
+          }
+
+          exports.handler = async function(event, context) {
+              console.log('Received Event: ', event);
+              if (!event.ResourceProperties || !event.ResourceProperties.ListenerArn) {
+                  await sendCloudformationResponse(event, context, FAILED, null, 'Listener Rule counter failed: Property ListenerArn is not defined');
+                  return;
+              }
+              if (event.RequestType == 'Delete') {
+                  // Cloudformation request to DELETE, just approve it
+                  await sendCloudformationResponse(event, context, SUCCESS);
+                  return;
+              }
+
+              try {
+                  const data = await getRuleCount(event.ResourceProperties.ListenerArn);
+                  await sendCloudformationResponse(event, context, SUCCESS, data);
+              } catch (err) {
+                  await sendCloudformationResponse(event, context, FAILED, null, err.message);
+              }
+          }
+
+  # This is how the custom resource is added to current CFT to call the lambda
+  TestCustomResource:
+    Type: Custom::RulePriority
+    Properties:
+      ServiceToken: !GetAtt ListenerRuleCounter.Arn
+      ListenerArn: !Ref ALBListenerArn
+
+Outputs:
+  TestNextPriority:
+    Value: !GetAtt TestCustomResource.nextPriority # This is how you use the result
+    Export:
+      Name: test-next-priority
