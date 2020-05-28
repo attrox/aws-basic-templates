@@ -1,0 +1,103 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Create Lambda that handles Spot instance termination notice by deregistering instance from "loadBalancerTargetGroup"
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: deregister-instance
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - elasticloadbalancing:DeregisterTargets
+                - ec2:DescribeTags
+              Resource: '*'
+
+  InstanceInterruptionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Events rule for Spot Instance Interruption Notices
+      EventPattern:
+        detail-type:
+        - EC2 Spot Instance Interruption Warning
+        source:
+        - aws.ec2
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: !Ref LambdaFunction
+
+  ExecuteLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InstanceInterruptionRule.Arn
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Function to deregister instance based on spot instance termination notice
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs12.x
+      Timeout: 10
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+
+          exports.handler = async function(event, context) {
+              const instanceId = event.detail['instance-id'];
+              const instanceAction = event.detail['instance-action'];
+              const targetGroupTag = 'loadBalancerTargetGroup';
+              let description;
+
+              try {
+                  const ec2 = new AWS.EC2();
+                  description = await ec2.describeTags({
+                      Filters: [
+                          { Name: 'resource-id', Values: [ instanceId ] },
+                          { Name: 'key', Values: [ targetGroupTag ] },
+                      ],
+                  }).promise();
+              } catch (err) {
+                  console.error('Unable to describe tags for Instance: ', instanceId);
+                  return;
+              }
+              
+              if (!description.Tags[0]) {
+                  console.error('Unable to describe tags for Instance: ', instanceId);
+                  return;
+              }
+              const targetGroup = description.Tags[0].Value;
+              try {
+                  const elbv2 = new AWS.ELBv2();
+                  await elbv2.deregisterTargets({
+                      TargetGroupArn: targetGroup,
+                      Targets: [{ Id: instanceId }],
+                  }).promise();
+              } catch (err) {
+                  console.error('Unable to de-register Instane: ', instanceId);
+                  return;
+              }
+
+              console.log('InstanceId: ', instanceId, ' detached.');
+              console.log('From Target Group: ', targetGroup);
+          }
